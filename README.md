@@ -10,9 +10,9 @@
 ## Установка
 
 ```bash
-npm install -g notcode-cli    # когда пакет опубликован
-# или из этого репозитория:
-npm install -g ./cli
+npm install -g github:notcodeapp/cli
+# или короче:
+npx github:notcodeapp/cli
 ```
 
 ## Быстрый старт
