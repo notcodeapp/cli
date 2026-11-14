@@ -7,5 +7,5 @@
   "engines": { "node": ">=18" },
   "files": ["bin", "lib", "README.md"],
   "license": "MIT",
-  "scripts": { "test": "node --test test/" }
+  "scripts": { "test": "node --test" }
 }
