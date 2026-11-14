@@ -279,12 +279,21 @@ async function main() {
     say('  notcode                  интерактивная сессия (меню чатов и моделей)');
     say('  notcode run "задача"     одна задача от начала до конца');
     say('  notcode models           список моделей провайдера');
+    say('  notcode sync push|pull   чаты и провайдер ↔ аккаунт (--with-key)');
     say('  notcode config           мастер настройки (show / set — по-старому)');
     say('  --dir <путь>             работать в другой папке');
     say('  --yes                    отключить подтверждения (осторожно!)');
     return;
   }
   if (command === 'run') return runOnce(root, rest);
+  if (command === 'sync') {
+    const direction = rest.find(a => a === 'push' || a === 'pull');
+    if (!direction) { fail('Использование: notcode sync push|pull [--with-key]'); return; }
+    const sync = require('../lib/sync');
+    if (direction === 'push') await sync.push(config, root, rest.includes('--with-key'));
+    else await sync.pull(config, root, rest.includes('--with-key'));
+    return;
+  }
   if (command === 'models') return models(args.filter(a => a !== 'models'));
   if (command === 'config') return configCommand(rest);
   fail(`Неизвестная команда: ${command}. Справка: notcode help`);
