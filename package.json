@@ -1,11 +1,22 @@
 {
   "name": "notcode-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "NotCode CLI — терминальный ИИ-агент для ваших проектов. Ваш API-ключ, подтверждение каждого действия. Linux, macOS и Windows.",
-  "bin": { "notcode": "bin/notcode.js" },
+  "bin": {
+    "notcode": "bin/notcode.js"
+  },
   "type": "commonjs",
-  "engines": { "node": ">=18" },
-  "files": ["bin", "lib", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
-  "scripts": { "test": "node --test" }
+  "scripts": {
+    "test": "node --test"
+  }
 }
