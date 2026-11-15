@@ -289,12 +289,58 @@ async function main() {
     say('  notcode run "задача"     одна задача от начала до конца');
     say('  notcode models           список моделей провайдера');
     say('  notcode sync push|pull   чаты и провайдер ↔ аккаунт (--with-key)');
+    say('  notcode google connect|status|backup — Google Drive');
     say('  notcode config           мастер настройки (show / set — по-старому)');
     say('  --dir <путь>             работать в другой папке');
     say('  --yes                    отключить подтверждения (осторожно!)');
     return;
   }
   if (command === 'run') return runOnce(root, rest);
+  if (command === 'google') {
+    const [action] = rest;
+    const cfg = await ensureConfig(args);
+    const account = { accountUrl: cfg.accountUrl, accountToken: cfg.accountToken };
+    if (!account.accountUrl || !account.accountToken) { fail('Нужен аккаунт: notcode config set accountUrl/accountToken'); return; }
+    const api = (method, path2, body) => fetch(account.accountUrl + path2, {
+      method,
+      headers: { Authorization: `Bearer ${account.accountToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }).then(r => r.json().catch(() => ({})));
+    if (action === 'connect') {
+      const url2 = `${account.accountUrl}/auth/google?token=${encodeURIComponent(account.accountToken)}`;
+      const opener = process.platform === 'win32' ? 'cmd /c start' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+      require('node:child_process').exec(`${opener} "${url2.replace(/&/g, '^&')}"`);
+      say('Открываю браузер для привязки Google Drive…');
+      return;
+    }
+    if (action === 'status') {
+      const st = await api('GET', '/api/google/status');
+      say(st.connected ? `Google Drive привязан: ${st.email}` : 'Google Drive не привязан.');
+      return;
+    }
+    if (action === 'backup') {
+      const sessionsDir = path.join(os.homedir(), '.notcode', 'sessions');
+      const chats = [];
+      for (const file of fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'))) {
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), 'utf8'));
+          chats.push({ id: data.id, title: data.name, model: data.model, messages: data.messages || [] });
+        } catch { /* skip */ }
+      }
+      const payload = JSON.stringify({ source: 'cli', exportedAt: Date.now(), chats });
+      const response = await fetch(`${account.accountUrl}/api/drive/backup?name=cli`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${account.accountToken}`, 'Content-Type': 'application/json' },
+        body: payload,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) { fail(data.error || `HTTP ${response.status}`); return; }
+      say(`Бэкап сохранён в Google Drive: ${data.bytes} байт, чатов ${chats.length}.`);
+      return;
+    }
+    say('Использование: notcode google connect|status|backup');
+    return;
+  }
   if (command === 'sync') {
     const direction = rest.find(a => a === 'push' || a === 'pull');
     if (!direction) { fail('Использование: notcode sync push|pull [--with-key]'); return; }
