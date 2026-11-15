@@ -7,6 +7,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const readline = require('node:readline');
 const config = require('../lib/config');
 const sessions = require('../lib/sessions');
