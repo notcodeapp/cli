@@ -236,15 +236,24 @@ async function configCommand(args) {
   if (action === 'show') {
     const current = config.resolve();
     say(`${C.text}config.json:${C.reset} ${config.configPath()}`);
-    say(`  baseUrl  ${current.baseUrl || `${C.red}не задан${C.reset}`}`);
-    say(`  model    ${current.model || `${C.red}не задана${C.reset}`}`);
-    say(`  key      ${current.key ? `${C.accent}задан (${current.key.length} симв.)${C.reset}` : `${C.red}не задан${C.reset}`}`);
+    say(`  baseUrl        ${current.baseUrl || `${C.red}не задан${C.reset}`}`);
+    say(`  model          ${current.model || `${C.red}не задана${C.reset}`}`);
+    say(`  key            ${current.key ? `${C.accent}задан (${current.key.length} симв.)${C.reset}` : `${C.red}не задан${C.reset}`}`);
+    say(`  accountUrl     ${current.accountUrl || `${C.dim}не задан${C.reset}`}`);
+    say(`  accountToken   ${current.accountToken ? `${C.accent}задан${C.reset}` : `${C.dim}не задан${C.reset}`}`);
     return;
   }
   if (action === 'set') {
-    if (!['baseUrl', 'model', 'key'].includes(key)) { fail('Ключи: baseUrl, model, key'); return; }
+    if (!['baseUrl', 'model', 'key', 'accountUrl', 'accountToken', 'syncKey'].includes(key)) {
+      fail('Ключи: baseUrl, model, key, accountUrl, accountToken, syncKey');
+      return;
+    }
     const value = rest.join(' ').trim();
     if (!value) { fail('Пустое значение'); return; }
+    if (key === 'accountToken' && !/^ncs_[A-Za-z0-9_-]+$/.test(value)) {
+      fail('accountToken — это токен сессии вида ncs_…');
+      return;
+    }
     if (key === 'baseUrl') {
       const bad = config.validateBaseUrl(value);
       if (bad) { fail(bad); return; }
