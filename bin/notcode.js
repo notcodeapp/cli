@@ -15,6 +15,9 @@ const sessions = require('../lib/sessions');
 const ui = require('../lib/ui-menu');
 const catalog = require('../lib/model-catalog');
 const chatUi = require('../lib/chat-ui');
+const mcp = require('../lib/mcp');
+
+const VERSION = require('../package.json').version;
 
 const NO_COLOR = !process.stdout.isTTY || process.env.NO_COLOR;
 const C = NO_COLOR ? { accent: '', dim: '', text: '', red: '', reset: '' } : {
@@ -114,14 +117,26 @@ function makeApprover(autoYes) {
 async function chatLoop(root, args) {
   let cfg = await ensureConfig(args);
   const autoYes = args.has('--yes');
-  ui.printBanner('v0.4.0 · ваш ключ · ваши модели');
-  say(`${C.dim}  ${{ }.toString.call(async () => 0).slice(8, -1) === 'Function' ? '' : ''}модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
-  say(`  ${C.dim}/new /model /sessions /search /config /exit${C.reset}`);
+  ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
+  say(`${C.dim}  модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
+  say(`  ${C.dim}/new /model /sessions /config /queue /exit · сообщение во время работы агента → в очередь${C.reset}`);
   say('');
 
   // сессия: новая или продолжение
   let session = await pickSession();
   if (session === undefined) return; // Esc в меню
+  if (session?.plan?.length) { say(''); for (const line of chatUi.planLines(session.plan)) say(line); say(''); }
+
+  // MCP-серверы из конфига подключаем один раз на сессию (best effort).
+  let mcpTools = [];
+  const mcpConfigs = mcp.serverConfigs(config.load());
+  if (mcpConfigs.length) {
+    say(`${C.dim}MCP-серверы: ${mcpConfigs.map(c => c.name).join(', ')}…${C.reset}`);
+    mcpTools = await mcp.collectMcpTools(mcpConfigs, warn => say(`${C.red}MCP:${C.reset} ${warn}`));
+    say(`${C.dim}MCP-инструментов подключено: ${mcpTools.length}${C.reset}`);
+  }
+  const closeMcp = () => { for (const b of mcpTools) b.client.close(); };
+  process.on('exit', closeMcp);
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: `${C.accent}вы › ${C.reset}` });
 
@@ -151,33 +166,111 @@ async function chatLoop(root, args) {
 
   rl.on('SIGINT', () => { say(''); rl.prompt(); });
   rl.prompt();
-  rl.on('line', (line) => {
-    const task = line.trim();
-    void (async () => {
-      if (!task) { rl.prompt(); return; }
-      if (task === '/exit' || task === '/quit') { rl.close(); return; }
-      if (task === '/new') { session = { id: null, name: '', messages: [] }; say(`${C.dim}новый чат${C.reset}\n`); rl.prompt(); return; }
-      if (task === '/sessions') { const next = await pickSession(); if (next !== undefined) session = next; rl.prompt(); return; }
-      if (task === '/model') { await switchModel(); rl.prompt(); return; }
-      if (task === '/config') { const next = await setupWizard(cfg); if (next) cfg = next; say(''); rl.prompt(); return; }
-      if (task.startsWith('/')) { say(`${C.dim}команды: /new · /sessions · /model · /config · /exit${C.reset}\n`); rl.prompt(); return; }
 
-      const result = await runTaskStream(cfg, root, session, task, autoYes);
+  // ---- очередь сообщений -------------------------------------------------------
+  // Во время генерации введённый текст не теряется: попадает в очередь и
+  // уходит агенту по мере освобождения. Выше в списке = раньше выполнится.
+  const queue = [];        // [{text}]
+  let busy = false;
+  let currentAbort = null; // AbortController текущей генерации
+
+  function printQueue() {
+    if (!queue.length) { say(`${C.dim}очередь пуста${C.reset}`); return; }
+    say(`${C.dim}очередь (первым выполнится верхний):${C.reset}`);
+    queue.forEach((item, i) => say(`  ${i + 1}. ${item.text}`));
+  }
+
+  async function executeTask(task) {
+    busy = true;
+    try {
+      const result = await runTaskStream(cfg, root, session, task, autoYes, mcpTools, queue, controller => { currentAbort = controller; });
       if (result) {
         session.id = session.id || `${Date.now()}-${sessions.slug(task)}`;
         session.name = session.name || task.slice(0, 60);
         session.model = cfg.model;
         session.messages = result.messages.filter(m => m.role !== 'system');
+        if (result.plan?.length) session.plan = result.plan;
         sessions.save(session);
       }
+    } finally { busy = false; currentAbort = null; }
+  }
+
+  async function pump() {
+    if (busy || !queue.length) return;
+    const next = queue.shift();
+    await executeTask(next.text);
+    await pump(); // следующий из очереди, если есть
+  }
+
+  function queueCommand(restArgs) {
+    const [action, indexRaw, ...direction] = restArgs;
+    const index = Number.parseInt(indexRaw, 10) - 1;
+    if (!action || action === 'list') { printQueue(); return; }
+    if (action === 'rm') {
+      if (!Number.isInteger(index) || !queue[index]) { fail('Укажите номер: /queue rm 1'); return; }
+      queue.splice(index, 1);
+      say(`${C.dim}удалено из очереди${C.reset}`);
+      return;
+    }
+    if (action === 'mv') {
+      const dir = direction.join(' ').trim();
+      if (!Number.isInteger(index) || !queue[index] || !['up', 'down', 'вверх', 'вниз'].includes(dir)) {
+        fail('Укажите: /queue mv 2 up (или down / вверх / вниз)');
+        return;
+      }
+      const target = dir === 'up' || dir === 'вверх' ? index - 1 : index + 1;
+      if (target < 0 || target >= queue.length) { fail('Переставлять некуда'); return; }
+      [queue[index], queue[target]] = [queue[target], queue[index]];
+      printQueue();
+      return;
+    }
+    if (action === 'send') {
+      // Принудительно: сообщение в начало очереди, текущая генерация прерывается.
+      if (!Number.isInteger(index) || !queue[index]) { fail('Укажите номер: /queue send 1'); return; }
+      if (!busy) { say(`${C.dim}агент свободен — очередь сама начнёт выполнение${C.reset}`); return; }
+      const [item] = queue.splice(index, 1);
+      queue.unshift(item);
+      say(`${C.accent}принудительная отправка:${C.reset} ${item.text}`);
+      currentAbort?.abort(new Error('Прервано: принудительная отправка из очереди'));
+      return;
+    }
+    fail('Использование: /queue [list] · /queue mv N up|down · /queue rm N · /queue send N');
+  }
+
+  rl.on('line', (line) => {
+    const task = line.trim();
+    void (async () => {
+      if (!task) { rl.prompt(); return; }
+      if (task === '/exit' || task === '/quit') { currentAbort?.abort(new Error('Прервано пользователем')); rl.close(); return; }
+      if (task === '/new') { session = { id: null, name: '', messages: [] }; say(`${C.dim}новый чат${C.reset}\n`); rl.prompt(); return; }
+      if (task === '/sessions') { const next = await pickSession(); if (next !== undefined) session = next; rl.prompt(); return; }
+      if (task === '/model') { await switchModel(); rl.prompt(); return; }
+      if (task === '/config') { const next = await setupWizard(cfg); if (next) cfg = next; say(''); rl.prompt(); return; }
+      if (task.startsWith('/queue')) { queueCommand(task.split(/\s+/).slice(1)); rl.prompt(); return; }
+      if (task.startsWith('/')) { say(`${C.dim}команды: /new · /sessions · /model · /config · /queue · /exit${C.reset}\n`); rl.prompt(); return; }
+
+      if (busy) {
+        queue.push({ text: task });
+        say(`${C.accent}⏳ в очереди (${queue.length}):${C.reset} ${task}`);
+        say(`${C.dim}   изменить: /queue list · mv N up|down · rm N · send N — отправить принудительно${C.reset}`);
+        rl.prompt();
+        return;
+      }
+      await pumpStart(task);
       rl.prompt();
     })();
-  }).on('close', () => { say(`${C.dim}пока!${C.reset}`); process.exit(0); });
+  }).on('close', () => { closeMcp(); say(`${C.dim}пока!${C.reset}`); process.exit(0); });
+
+  async function pumpStart(firstTask) {
+    queue.unshift({ text: firstTask });
+    await pump();
+  }
 }
 
-async function runTaskStream(cfg, root, session, task, autoYes) {
+async function runTaskStream(cfg, root, session, task, autoYes, mcpTools = [], queue = [], registerController = () => {}) {
   const approve = makeApprover(autoYes);
   const controller = new AbortController();
+  registerController(controller);
   const onSigInt = () => controller.abort(new Error('Прервано пользователем'));
   process.on('SIGINT', onSigInt);
   say('');
@@ -192,14 +285,22 @@ async function runTaskStream(cfg, root, session, task, autoYes) {
     }
   }
 
+  function renderPlan(steps) {
+    say('');
+    for (const line of chatUi.planLines(steps)) say(line);
+    say('');
+  }
+
   try {
-    const { answer, messages } = await require('../lib/agent').runAgent({
+    const { answer, messages, plan } = await require('../lib/agent').runAgent({
       config: cfg,
       root,
       history: session?.messages || [],
       task,
       approve,
       signal: controller.signal,
+      mcpTools,
+      onPlan: (steps) => { spinner.stop(); renderPlan(steps); spinner.start('работаю…'); },
       onDelta: (text) => { spinner.stop(); process.stdout.write(C.text + text + C.reset); },
       onAction: ({ name, detail, done }) => {
         spinner.stop();
@@ -211,7 +312,7 @@ async function runTaskStream(cfg, root, session, task, autoYes) {
           say(chatUi.toolLine(name, detail, false));
           if (name === 'run_command' || name === 'write_file') spinner.update(name === 'run_command' ? 'выполняю…' : 'записываю…');
         }
-        spinner.start('работаю…');
+        spinner.start(queue.length ? `работаю… · в очереди: ${queue.length}` : 'работаю…');
       },
       onToolOutput: (text) => {
         for (const line of text.split('\n')) toolOutputLines.push({ text: line, color: C.dim });
@@ -222,7 +323,7 @@ async function runTaskStream(cfg, root, session, task, autoYes) {
     say('\n');
     say(chatUi.messageBubble('assistant', answer || '(пустой ответ)'));
     say('');
-    return { answer, messages };
+    return { answer, messages, plan };
   } catch (error) {
     spinner.stop();
     flushToolBlock();
@@ -308,6 +409,46 @@ async function configCommand(args) {
   say('Использование: notcode config | notcode config show | notcode config set <baseUrl|model|key> <значение>');
 }
 
+// ---- MCP: управление серверами ---------------------------------------------------
+
+function mcpCommand(args) {
+  const [action, name, ...rest] = args;
+  if (!action || action === 'list') {
+    const servers = mcp.serverConfigs(config.load());
+    if (!servers.length) { say(`${C.dim}MCP-серверов нет. Добавьте: notcode mcp add files -- node server.js${C.reset}`); return; }
+    say(`${C.text}MCP-серверы (config.json → mcpServers):${C.reset}`);
+    for (const s of servers) {
+      say(`  ${C.accent}${s.name}${C.reset}  ${s.command} ${s.args.join(' ')}`);
+    }
+    say(`${C.dim}Инструменты подключатся автоматически при старте чата.${C.reset}`);
+    return;
+  }
+  if (action === 'add') {
+    if (!name) { fail('Укажите имя: notcode mcp add files -- node server.js'); return; }
+    const sep = rest.indexOf('--');
+    if (sep < 0) { fail('После имени укажите «--» и команду запуска сервера'); return; }
+    const command = rest.slice(0, sep).join(' ').trim();
+    const serverArgs = rest.slice(sep + 1).filter(a => a !== '--');
+    if (!command) { fail('Пустая команда сервера'); return; }
+    const current = config.load();
+    const servers = { ...(current.mcpServers || {}), [name]: { command, ...(serverArgs.length ? { args: serverArgs } : {}) } };
+    config.save({ mcpServers: servers });
+    say(`${C.accent}добавлено:${C.reset} ${name} → ${command} ${serverArgs.join(' ')}`);
+    return;
+  }
+  if (action === 'remove') {
+    if (!name) { fail('Укажите имя сервера: notcode mcp remove files'); return; }
+    const current = config.load();
+    if (!current.mcpServers?.[name]) { fail(`Сервер «${name}» не найден`); return; }
+    const servers = { ...current.mcpServers };
+    delete servers[name];
+    config.save({ mcpServers: servers });
+    say(`${C.accent}удалено:${C.reset} ${name}`);
+    return;
+  }
+  say('Использование: notcode mcp list | notcode mcp add <имя> -- <команда> [аргументы] | notcode mcp remove <имя>');
+}
+
 // ---- dispatch --------------------------------------------------------------------
 
 async function main() {
@@ -327,15 +468,19 @@ async function main() {
   const [command, ...rest] = args;
   if (!command || command === 'chat') return chatLoop(root, args);
   if (command === 'help' || command === '--help' || command === '-h') {
-    ui.printBanner('v0.2.0 · ваш ключ · ваши модели');
+    ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
     say('  notcode                  интерактивная сессия (меню чатов и моделей)');
     say('  notcode run "задача"     одна задача от начала до конца');
     say('  notcode models           список моделей провайдера');
+    say('  notcode mcp list         MCP-серверы (add <имя> -- <команда> / remove)');
     say('  notcode sync push|pull   чаты и провайдер ↔ аккаунт (--with-key)');
     say('  notcode google connect|status|backup — Google Drive');
+    say('  notcode version          версия CLI');
     say('  notcode config           мастер настройки (show / set — по-старому)');
     say('  --dir <путь>             работать в другой папке');
     say('  --yes                    отключить подтверждения (осторожно!)');
+    say('');
+    say(`${C.dim}  в чате: /new /sessions /model /config /queue /exit · сообщения во время работы агента попадают в очередь (/queue send N — принудительно)${C.reset}`);
     return;
   }
   if (command === 'run') return runOnce(root, rest);
@@ -393,6 +538,8 @@ async function main() {
   }
   if (command === 'models') return models(args.filter(a => a !== 'models'));
   if (command === 'config') return configCommand(rest);
+  if (command === 'mcp') return mcpCommand(rest);
+  if (command === 'version' || command === '--version' || command === '-v') { say(`notcode-cli v${VERSION}`); return; }
   fail(`Неизвестная команда: ${command}. Справка: notcode help`);
 }
 
