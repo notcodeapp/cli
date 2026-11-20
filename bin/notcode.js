@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 'use strict';
 // NotCode CLI entry point — frameless TUI without dependencies.
 //   notcode                интерактивная сессия (баннер → чаты → диалог)
