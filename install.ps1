@@ -1,6 +1,13 @@
-﻿# NotCode CLI — one-line installer for Windows PowerShell.
+# NotCode CLI - one-line installer for Windows PowerShell.
 #   irm https://raw.githubusercontent.com/notcodeapp/cli/main/install.ps1 | iex
-# Installs Node.js LTS (if missing) and the notcode-cli package via npm.
+# Installs Node.js LTS (if missing) and the notcode CLI via npm.
+#
+# Notes for maintainers:
+# - NO BOM: iex chokes on a leading BOM ("irm ... | iex" is the documented path;
+#   irm decodes the body correctly because raw.githubusercontent sends charset=utf-8).
+# - Every native command runs through cmd.exe with 2>&1 merged into stdout:
+#   under iex, stderr would otherwise become an ErrorRecord and, with
+#   ErrorActionPreference=Stop, kill the script mid-way.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -17,77 +24,84 @@ function Show-Banner {
  |_| \_|\___/ |_____\___/|_|____) |
 '@
   Write-Host $b -ForegroundColor Green
-  Write-Host '  NotCode CLI — ИИ-агент в терминале' -ForegroundColor White
+  Write-Host '  NotCode CLI - AI agent for your terminal' -ForegroundColor White
   Write-Host ''
 }
 
-function Test-Command([string]$Name) {
-  return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
-}
-
-function Get-NodeVersion {
-  try { return (& node --version) 2>$null } catch { return $null }
+# Run a shell command with stderr merged into stdout (see header notes).
+# Returns exit code and combined output; never throws on stderr traffic.
+function Run-Cmd([string]$Command) {
+  $ErrorActionPreference = 'Continue'
+  $output = & cmd.exe /c "$Command 2>&1"
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  return @{ Exit = $code; Output = (($output | ForEach-Object { "$_" }) -join "`n") }
 }
 
 function Install-NodeLts {
-  Write-Step 'Node.js не найден — устанавливаю LTS'
-  # Prefer winget: it is present on Windows 10/11 and handles PATH refresh.
-  if (Test-Command 'winget') {
+  Write-Step 'Node.js not found - installing LTS'
+  if ((Run-Cmd 'winget --version').Exit -eq 0) {
     Write-Info 'winget install OpenJS.NodeJS.LTS'
-    & winget install --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -eq 0 -and (Test-Command 'node')) { return }
+    $r = Run-Cmd 'winget install --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements'
+    $check = Run-Cmd 'node --version'
+    if ($check.Exit -eq 0) { return }
+    Write-Warn2 'winget path failed, falling back to MSI download'
   }
-  # Fallback: direct MSI download for 64-bit Windows.
-  Write-Info 'Скачиваю установщик Node.js LTS с nodejs.org'
+  Write-Info 'Downloading Node.js LTS MSI from nodejs.org'
   $msi = Join-Path $env:TEMP 'notcode-node-lts.msi'
-  $url = 'https://nodejs.org/dist/latest-v22.x/node-v22.x-x64.msi'
-  # Resolve the exact filename from the dist index (names carry the real version).
+  # Resolve the exact MSI filename from the dist index (it carries the real version).
   $index = Invoke-WebRequest -Uri 'https://nodejs.org/dist/latest-v22.x/' -UseBasicParsing
-  if ($index.Links -and $index.Links.Count -gt 0) {
-    $msiLink = ($index.Links | Where-Object { $_.href -match '^node-v\d+\.\d+\.\d+-x64\.msi$' } | Select-Object -First 1)
-    if ($msiLink) { $url = "https://nodejs.org/dist/latest-v22.x/$($msiLink.href)" }
-  }
-  Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
-  Write-Info 'Запускаю установщик (silent)'
+  $msiHref = ($index.Links | Where-Object { $_.href -match '^node-v\d+\.\d+\.\d+-x64\.msi$' } | Select-Object -First 1).href
+  if (-not $msiHref) { throw 'Не удалось определить имя установщика Node.js на nodejs.org' }
+  Invoke-WebRequest -Uri "https://nodejs.org/dist/latest-v22.x/$msiHref" -OutFile $msi -UseBasicParsing
+  Write-Info 'Running installer (silent)'
   Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
   Remove-Item $msi -Force -ErrorAction SilentlyContinue
   # Refresh PATH for the current session so node/npm are visible immediately.
-  $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $env:Path = "$machinePath;$userPath"
-  if (-not (Test-Command 'node')) {
+  $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ((Run-Cmd 'node --version').Exit -ne 0) {
     throw 'Node.js установлен, но не найден в PATH. Откройте новый PowerShell и запустите команду установки ещё раз.'
   }
 }
 
 Show-Banner
 
-Write-Step 'Проверяю окружение'
-if (-not (Test-Command 'node') -or -not (Get-NodeVersion)) {
+Write-Step 'Checking environment'
+$node = Run-Cmd 'node --version'
+if ($node.Exit -ne 0) {
   Install-NodeLts
+  $node = Run-Cmd 'node --version'
 }
-$nodeVer = Get-NodeVersion
-Write-Info "Node.js $nodeVer"
-$npmVer = (& npm --version) 2>$null
-Write-Info "npm $npmVer"
+Write-Info ("Node.js " + $node.Output.Trim())
+$npm = Run-Cmd 'npm --version'
+Write-Info ("npm " + $npm.Output.Trim())
+if ($npm.Exit -ne 0) { throw 'npm не найден. Переустановите Node.js LTS и попробуйте снова.' }
 
-Write-Step 'Устанавливаю NotCode CLI'
+Write-Step 'Installing NotCode CLI'
+# Published registry package first (probe is cheap); GitHub repo is the
+# guaranteed fallback that always has the latest commit.
+$published = Run-Cmd 'npm view notcode-cli version --fetch-timeout=15000'
 $installed = $false
-# Published package first, GitHub fallback for fresh releases.
-& npm install -g notcode-cli 2>$null
-if ($LASTEXITCODE -eq 0) { $installed = $true } else {
-  Write-Warn2 'notcode-cli из npm недоступен — пробую репозиторий GitHub'
-  & npm install -g github:notcodeapp/cli
-  if ($LASTEXITCODE -eq 0) { $installed = $true }
+if ($published.Exit -eq 0) {
+  $r = Run-Cmd 'npm install -g notcode-cli'
+  if ($r.Exit -eq 0) { $installed = $true }
+  else { Write-Warn2 'npm registry install failed, trying GitHub' }
 }
-if (-not $installed) { throw 'Не удалось установить notcode-cli через npm. Проверьте интернет и права доступа.' }
+if (-not $installed) {
+  $r = Run-Cmd 'npm install -g github:notcodeapp/cli'
+  if ($r.Exit -ne 0) {
+    Write-Warn2 $r.Output
+    throw 'Не удалось установить notcode-cli через npm. Проверьте интернет и права доступа.'
+  }
+}
 
-Write-Step 'Готово!'
+Write-Step 'Done!'
 Write-Host ''
-Write-Host '  Запустите в терминале:' -ForegroundColor White
+Write-Host '  Run in your terminal:' -ForegroundColor White
 Write-Host '    notcode' -ForegroundColor Cyan
 Write-Host ''
-Write-Host '  Выбор моделей: провайдеры Ollama, OpenAI-compatible, OpenCode Zen (бесплатные модели), Codex, Claude.' -ForegroundColor Gray
-Write-Host '  Документация: https://github.com/notcodeapp/cli' -ForegroundColor Gray
+Write-Host '  Models: Ollama, OpenAI-compatible, OpenCode Zen (free models), Codex, Claude.' -ForegroundColor Gray
+Write-Host '  Docs: https://github.com/notcodeapp/cli' -ForegroundColor Gray
 Write-Host ''
-& notcode --version
+$ver = Run-Cmd 'notcode --version'
+if ($ver.Exit -eq 0) { Write-Info ($ver.Output.Trim()) }
