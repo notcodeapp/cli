@@ -12,6 +12,8 @@ const readline = require('node:readline');
 const config = require('../lib/config');
 const sessions = require('../lib/sessions');
 const ui = require('../lib/ui-menu');
+const catalog = require('../lib/model-catalog');
+const chatUi = require('../lib/chat-ui');
 
 const NO_COLOR = !process.stdout.isTTY || process.env.NO_COLOR;
 const C = NO_COLOR ? { accent: '', dim: '', text: '', red: '', reset: '' } : {
@@ -69,9 +71,15 @@ async function pickModelInteractive(cfg, title) {
   try { ids = await fetchModelList(cfg); } catch (error) { fail(error.message); return null; }
   if (!ids.length) return ui.promptLine('Провайдер не отдал список моделей — введите имя модели вручную');
   say(`${C.dim}Моделей у провайдера: ${ids.length}${C.reset}`);
-  const index = await ui.pickMenu({ title, items: ids.map(id => ({ label: id })), pageSize: 14 });
+  // Сортируем: сначала известные (каталог), потом остальные. Free — в начало.
+  const items = ids.map(id => {
+    const meta = catalog.lookup(id);
+    const isFree = meta?.free || id.includes(':free');
+    return { label: id, hint: catalog.describe(id), priority: meta ? (isFree ? 0 : 1) : 2, free: isFree };
+  }).sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label));
+  const index = await ui.pickMenu({ title, items, pageSize: 16 });
   if (index === null) return null;
-  return ids[index];
+  return ids.length > items.length ? items[index] ? items[index].label : null : ids[index];
 }
 
 // ---- approvals ----------------------------------------------------------------
@@ -104,7 +112,10 @@ function makeApprover(autoYes) {
 async function chatLoop(root, args) {
   let cfg = await ensureConfig(args);
   const autoYes = args.has('--yes');
-  ui.printBanner('ваш ключ · ваши модели · ваши файлы');
+  ui.printBanner('v0.4.0 · ваш ключ · ваши модели');
+  say(`${C.dim}  ${{ }.toString.call(async () => 0).slice(8, -1) === 'Function' ? '' : ''}модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
+  say(`  ${C.dim}/new /model /sessions /search /config /exit${C.reset}`);
+  say('');
 
   // сессия: новая или продолжение
   let session = await pickSession();
@@ -168,6 +179,17 @@ async function runTaskStream(cfg, root, session, task, autoYes) {
   const onSigInt = () => controller.abort(new Error('Прервано пользователем'));
   process.on('SIGINT', onSigInt);
   say('');
+  const spinner = new chatUi.Spinner('думаю…');
+  let toolOutputLines = [];
+
+  function flushToolBlock() {
+    if (toolOutputLines.length) {
+      const block = new chatUi.CollapsibleBlock(toolOutputLines);
+      for (const line of block.render()) say(line);
+      toolOutputLines = [];
+    }
+  }
+
   try {
     const { answer, messages } = await require('../lib/agent').runAgent({
       config: cfg,
@@ -176,19 +198,37 @@ async function runTaskStream(cfg, root, session, task, autoYes) {
       task,
       approve,
       signal: controller.signal,
-      onDelta: (text) => process.stdout.write(C.text + text + C.reset),
+      onDelta: (text) => { spinner.stop(); process.stdout.write(C.text + text + C.reset); },
       onAction: ({ name, detail, done }) => {
-        if (done) say(`${C.dim}  ✓ ${name}${detail ? ' · ' + detail : ''}${C.reset}`);
-        else say(`${C.accent}▸ ${name}${detail ? ' ' + detail : ''}${C.reset}`);
+        spinner.stop();
+        if (done) {
+          flushToolBlock();
+          say(chatUi.toolLine(name, detail, true));
+        } else {
+          flushToolBlock();
+          say(chatUi.toolLine(name, detail, false));
+          if (name === 'run_command' || name === 'write_file') spinner.update(name === 'run_command' ? 'выполняю…' : 'записываю…');
+        }
+        spinner.start('работаю…');
+      },
+      onToolOutput: (text) => {
+        for (const line of text.split('\n')) toolOutputLines.push({ text: line, color: C.dim });
       },
     });
+    spinner.stop();
+    flushToolBlock();
     say('\n');
+    say(chatUi.messageBubble('assistant', answer || '(пустой ответ)'));
+    say('');
     return { answer, messages };
   } catch (error) {
+    spinner.stop();
+    flushToolBlock();
     say('');
     fail(error.message || String(error));
     return null;
   } finally {
+    spinner.stop();
     process.removeListener('SIGINT', onSigInt);
   }
 }
@@ -299,8 +339,7 @@ async function main() {
   if (command === 'run') return runOnce(root, rest);
   if (command === 'google') {
     const [action] = rest;
-    const cfg = await ensureConfig(args);
-    const account = { accountUrl: cfg.accountUrl, accountToken: cfg.accountToken };
+    const account = { accountUrl: config.resolve().accountUrl, accountToken: config.resolve().accountToken };
     if (!account.accountUrl || !account.accountToken) { fail('Нужен аккаунт: notcode config set accountUrl/accountToken'); return; }
     const api = (method, path2, body) => fetch(account.accountUrl + path2, {
       method,
