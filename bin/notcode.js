@@ -24,6 +24,7 @@ const say = (text = '') => process.stdout.write(text + '\n');
 const fail = (message) => { say(`${C.red}ошибка:${C.reset} ${message}`); process.exitCode = 1; };
 
 const PROVIDER_PRESETS = [
+  { label: 'OpenCode Zen', hint: 'бесплатные модели (big-pickle, DeepSeek Flash и др.)', value: 'https://opencode.ai/inference/openai/v1' },
   { label: 'OpenRouter', hint: 'сотни моделей, один ключ', value: 'https://openrouter.ai/api/v1' },
   { label: 'DeepSeek', hint: 'api.deepseek.com', value: 'https://api.deepseek.com/v1' },
   { label: 'Groq', hint: 'быстрый инференс', value: 'https://api.groq.com/openai/v1' },

@@ -9,6 +9,14 @@
 
 ## Установка
 
+**Windows — одна команда** (PowerShell, ставит Node.js при необходимости и сам CLI):
+
+```powershell
+irm https://raw.githubusercontent.com/notcodeapp/cli/main/install.ps1 | iex
+```
+
+**Любая платформа через npm:**
+
 ```bash
 npm install -g github:notcodeapp/cli
 # или короче:
