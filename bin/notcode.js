@@ -20,7 +20,7 @@ const mcp = require('../lib/mcp');
 const VERSION = require('../package.json').version;
 
 const NO_COLOR = !process.stdout.isTTY || process.env.NO_COLOR;
-const C = NO_COLOR ? { accent: '', dim: '', text: '', red: '', reset: '' } : {
+const C = NO_COLOR ? { accent: '', dim: '', text: '', red: '', reset: '', bold: '' } : {
   accent: '\x1b[38;5;154m', dim: '\x1b[90m', text: '\x1b[97m', red: '\x1b[91m', reset: '\x1b[0m',
 };
 const say = (text = '') => process.stdout.write(text + '\n');
@@ -166,7 +166,7 @@ async function chatLoop(root, args) {
   let cfg = await ensureConfig(args);
   const autoYes = args.has('--yes');
   say(`${C.dim}  модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
-  say(`  ${C.dim}/new /model /sessions /plan /queue /config /exit · сообщение во время работы агента → в очередь${C.reset}`);
+  say(`  ${C.dim}/new /model /sessions /plan /queue /share /doctor /config /exit${C.reset}`);
   say('');
 
   // сессия: новая или продолжение
@@ -249,6 +249,25 @@ async function chatLoop(root, args) {
     await pump(); // следующий из очереди, если есть
   }
 
+  async function shareChat() {
+    const account = config.resolve();
+    if (!account.accountUrl || !account.accountToken) { fail('Нужен аккаунт: notcode config set accountUrl <url> и accountToken <ncs_…>'); return; }
+    if (!session?.messages?.length) { fail('Диалог пуст — делиться нечем.'); return; }
+    try {
+      const response = await fetch(`${account.accountUrl}/api/share`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${account.accountToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: session.name || 'Диалог NotCode',
+          messages: session.messages.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, text: m.content })),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) { fail(data.error || `HTTP ${response.status}`); return; }
+      say(`${C.accent}публичная ссылка (90 дней):${C.reset} ${data.url}`);
+    } catch (error) { fail(error.message || String(error)); }
+  }
+
   function queueCommand(restArgs) {
     const [action, indexRaw, ...direction] = restArgs;
     const index = Number.parseInt(indexRaw, 10) - 1;
@@ -291,6 +310,8 @@ async function chatLoop(root, args) {
       if (task === '/exit' || task === '/quit') { currentAbort?.abort(new Error('Прервано пользователем')); rl.close(); return; }
       if (task === '/new') { session = { id: null, name: '', messages: [] }; say(`${C.dim}новый чат${C.reset}\n`); rl.prompt(); return; }
       if (task === '/sessions') { const next = await pickSession(); if (next !== undefined) session = next; rl.prompt(); return; }
+      if (task === '/share') { await shareChat(); rl.prompt(); return; }
+      if (task === '/doctor') { await doctor(); rl.prompt(); return; }
       if (task === '/plan') {
         if (session?.plan?.length) { for (const line of chatUi.planLines(session.plan)) say(line); }
         else say(`${C.dim}плана пока нет — агент сам создаст чеклист на многошаговой задаче${C.reset}`);
@@ -344,7 +365,7 @@ async function runTaskStream(cfg, root, session, task, autoYes, mcpTools = [], q
   }
 
   try {
-    const { answer, messages, plan } = await require('../lib/agent').runAgent({
+    const { answer, messages, plan, usage } = await require('../lib/agent').runAgent({
       config: cfg,
       root,
       history: session?.messages || [],
@@ -374,8 +395,12 @@ async function runTaskStream(cfg, root, session, task, autoYes, mcpTools = [], q
     flushToolBlock();
     say('\n');
     say(chatUi.messageBubble('assistant', answer || '(пустой ответ)'));
+    if (usage.total_tokens) {
+      const mark = usage.estimated ? '≈' : '';
+      say(`${C.dim}  ${mark}токены: ${usage.total_tokens} (запрос ${usage.prompt_tokens} · ответ ${usage.completion_tokens})${C.reset}`);
+    }
     say('');
-    return { answer, messages, plan };
+    return { answer, messages, plan, usage };
   } catch (error) {
     spinner.stop();
     flushToolBlock();
@@ -503,6 +528,29 @@ function mcpCommand(args) {
   say('Использование: notcode mcp list | notcode mcp add <имя> -- <команда> [аргументы] | notcode mcp remove <имя>');
 }
 
+// ---- diagnostics -------------------------------------------------------------------
+
+async function doctor() {
+  const cfg = config.resolve();
+  say(`${C.bold}notcode doctor${C.reset}`);
+  say(`  версия CLI        ${C.accent}${VERSION}${C.reset}`);
+  say(`  baseUrl           ${cfg.baseUrl || `${C.red}не задан${C.reset}`}`);
+  say(`  модель            ${cfg.model || `${C.red}не задана${C.reset}`}`);
+  say(`  ключ              ${cfg.key ? `${C.accent}задан${C.reset}` : `${C.dim}не задан (ок для локальных шлюзов)${C.reset}`}`);
+  say(`  сохранённых модел. ${cfg.models.length}`);
+  say(`  аккаунт           ${cfg.accountUrl ? cfg.accountUrl : `${C.dim}не привязан${C.reset}`}`);
+  try {
+    const started = Date.now();
+    const response = await fetch(`${cfg.baseUrl}/models`, cfg.key ? { headers: { Authorization: `Bearer ${cfg.key}` } } : {});
+    say(`  /models           ${response.ok ? `${C.accent}HTTP ${response.status}${C.reset} · ${Date.now() - started} мс` : `${C.red}HTTP ${response.status}${C.reset}`}`);
+  } catch (error) {
+    say(`  /models           ${C.red}недоступен · ${error.message}${C.reset}`);
+  }
+  const servers = require('../lib/mcp').serverConfigs(config.load());
+  say(`  MCP-серверы       ${servers.length ? servers.map(s => s.name).join(', ') : `${C.dim}нет${C.reset}`}`);
+  say(`  конфиг            ${config.configPath()}`);
+}
+
 // ---- dispatch --------------------------------------------------------------------
 
 async function main() {
@@ -594,6 +642,7 @@ async function main() {
   if (command === 'config') return configCommand(rest);
   if (command === 'mcp') return mcpCommand(rest);
   if (command === 'version' || command === '--version' || command === '-v') { say(`notcode-cli v${VERSION}`); return; }
+  if (command === 'doctor') return doctor();
   fail(`Неизвестная команда: ${command}. Справка: notcode help`);
 }
 
