@@ -164,7 +164,7 @@ async function chatLoop(root, args) {
   // Брендинг — до мастера настройки, чтобы он был виден и при первом запуске.
   ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
   let cfg = await ensureConfig(args);
-  const autoYes = args.has('--yes');
+  const autoYes = args.includes('--yes');
   say(`${C.dim}  модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
   say(`  ${C.dim}/new /model /sessions /plan /queue /share /doctor /config /exit${C.reset}`);
   say('');
@@ -435,7 +435,7 @@ async function runOnce(root, args) {
   if (!task) { fail('Укажите задачу: notcode run "исправь тесты в src"'); return; }
   ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
   const cfg = await ensureConfig(args);
-  const result = await runTaskStream(cfg, root, { messages: [] }, task, args.has('--yes'));
+  const result = await runTaskStream(cfg, root, { messages: [] }, task, args.includes('--yes'));
   process.exitCode = result ? 0 : 1;
 }
 
@@ -646,4 +646,9 @@ async function main() {
   fail(`Неизвестная команда: ${command}. Справка: notcode help`);
 }
 
-main().catch((error) => { fail(error.message || String(error)); });
+if (require.main === module) {
+  main().catch((error) => { fail(error.message || String(error)); });
+}
+
+// Внутренние функции — для эмуляционных тестов (test/wizard.test.js).
+module.exports = { main, __internals: { setupWizard, chatLoop, runTaskStream, ensureConfig } };

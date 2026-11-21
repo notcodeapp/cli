@@ -26,7 +26,7 @@ function Show-Banner {
 ╚═╝  ╚═══╝  ╚═════╝   ╚═════╝     ╚═════╝   ╚═════╝  ╚═════╝  ╚══════╝
 '@
   Write-Host $b -ForegroundColor Green
-  Write-Host '  NotCode CLI - AI agent for your terminal' -ForegroundColor White
+  Write-Host '  notcode · ваш ключ · ваши модели' -ForegroundColor White
   Write-Host ''
 }
 
