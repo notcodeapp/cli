@@ -32,40 +32,80 @@ const PROVIDER_PRESETS = [
   { label: 'DeepSeek', hint: 'api.deepseek.com', value: 'https://api.deepseek.com/v1' },
   { label: 'Groq', hint: 'быстрый инференс', value: 'https://api.groq.com/openai/v1' },
   { label: 'OpenAI', hint: 'api.openai.com', value: 'https://api.openai.com/v1' },
-  { label: 'Ollama · локально', hint: '127.0.0.1:11434', value: 'http://127.0.0.1:11434/v1' },
+  { label: 'Ollama · локально', hint: '127.0.0.1:11434 · без ключа', value: 'http://127.0.0.1:11434/v1', noKey: true },
   { label: 'Свой адрес…', hint: 'любой OpenAI-compatible', value: '__custom__' },
 ];
 
 // ---- provider/model setup ----------------------------------------------------
 
 async function fetchModelList(cfg) {
-  const response = await fetch(`${cfg.baseUrl}/models`, { headers: { Authorization: `Bearer ${cfg.key}` } });
+  const response = await fetch(`${cfg.baseUrl}/models`, cfg.key ? { headers: { Authorization: `Bearer ${cfg.key}` } } : {});
   if (!response.ok) throw new Error(`Провайдер вернул HTTP ${response.status} на /models`);
   const data = await response.json();
   return (data.data || data.models || []).map(m => m.id || m.name).filter(Boolean);
 }
 
+/// Правка полученного списка: добавить свои имена, убрать лишние, сохранить.
+/// Esc в меню «Готово» тоже сохраняет — отменить можно только до выбора модели.
+async function editModelList(ids) {
+  let list = [...ids];
+  for (;;) {
+    const items = [
+      { label: `Готово — сохранить (${list.length} модел.)`, hint: 'переходим к выбору модели' },
+      { label: 'Добавить модель вручную…', hint: 'имя из каталога провайдера или своё' },
+      { label: 'Убрать модель из списка…', hint: 'почистить мусорные записи' },
+    ];
+    const index = await ui.pickMenu({ title: `Получено моделей: ${list.length}. Что изменить?`, items, pageSize: 8 });
+    if (index === null || index === 0) return list;
+    if (index === 1) {
+      const added = await ui.promptLine('Имя модели (можно несколько через запятую)');
+      if (added) for (const name of added.split(/[\s,]+/).map(v => v.trim()).filter(Boolean)) {
+        if (!list.includes(name)) list.push(name);
+      }
+    } else if (list.length) {
+      const removeIndex = await ui.pickMenu({ title: 'Какую модель убрать? (Esc — назад)', items: list.map(id => ({ label: id })), pageSize: 16 });
+      if (removeIndex !== null) list.splice(removeIndex, 1);
+    }
+  }
+}
+
 async function setupWizard(current) {
-  let cfg = { ...current };
-  if (!cfg.baseUrl) {
-    const index = await ui.pickMenu({ title: 'Выберите провайдера', items: PROVIDER_PRESETS });
-    if (index === null) return null;
-    const preset = PROVIDER_PRESETS[index];
-    cfg.baseUrl = preset.value === '__custom__'
-      ? await ui.promptLine('Адрес API (например, https://my-gateway.example/v1)')
-      : preset.value;
-    if (!cfg.baseUrl) return null;
-    const bad = config.validateBaseUrl(cfg.baseUrl);
-    if (bad) { fail(bad); return null; }
+  const cfg = { ...current };
+  // 1. Провайдер: текущий остаётся по умолчанию, пресеты и свой адрес — рядом.
+  const presets = cfg.baseUrl
+    ? [{ label: `Оставить текущий · ${cfg.baseUrl}`, hint: 'Enter', value: cfg.baseUrl, noKey: cfg.key === '' }, ...PROVIDER_PRESETS]
+    : PROVIDER_PRESETS;
+  const presetIndex = await ui.pickMenu({ title: 'Выберите провайдера', items: presets, pageSize: 10 });
+  if (presetIndex === null) return null;
+  const preset = presets[presetIndex];
+  cfg.baseUrl = preset.value === '__custom__'
+    ? await ui.promptLine('Адрес API (например, https://my-gateway.example/v1)')
+    : preset.value;
+  if (!cfg.baseUrl) return null;
+  const bad = config.validateBaseUrl(cfg.baseUrl);
+  if (bad) { fail(bad); return null; }
+  // 2. Ключ — опционален: локальным шлюзам не нужен, Enter пропускает.
+  if (!preset.noKey && !cfg.key) {
+    cfg.key = await ui.askSecret('API-ключ провайдера (Enter — пропустить, если ключ не нужен)');
   }
-  if (!cfg.key) {
-    cfg.key = await ui.askSecret('API-ключ провайдера');
-    if (!cfg.key) { fail('Без ключа агент не сможет отвечать.'); return null; }
-  }
-  if (!cfg.model) {
-    const chosen = await pickModelInteractive(cfg, 'Выберите модель');
-    if (!chosen) return null;
-    cfg.model = chosen;
+  // 3. Живой список моделей провайдера.
+  say(`${C.dim}Получаю список моделей с ${cfg.baseUrl}…${C.reset}`);
+  let ids = [];
+  try { ids = await fetchModelList(cfg); } catch (error) { fail(error.message); }
+  if (ids.length) {
+    say(`${C.dim}Моделей у провайдера: ${ids.length}${C.reset}`);
+    const edited = await editModelList(ids);
+    if (!edited || !edited.length) return null;
+    cfg.models = edited.join(',');
+    const modelIndex = await ui.pickMenu({ title: 'Модель по умолчанию', items: edited.map(id => ({ label: id, hint: catalog.describe(id) })), pageSize: 16 });
+    if (modelIndex === null) return null;
+    cfg.model = edited[modelIndex];
+  } else {
+    say(`${C.dim}Список недоступен — введите модель вручную${C.reset}`);
+    const manual = await ui.promptLine('Модель по умолчанию (например, gpt-4o-mini)');
+    if (!manual) return null;
+    cfg.model = manual;
+    cfg.models = manual;
   }
   config.save(cfg);
   return config.resolve(cfg);
@@ -73,7 +113,13 @@ async function setupWizard(current) {
 
 async function pickModelInteractive(cfg, title) {
   let ids = [];
-  try { ids = await fetchModelList(cfg); } catch (error) { fail(error.message); return null; }
+  try { ids = await fetchModelList(cfg); } catch (error) {
+    // Живой список недоступен — показываем сохранённый из мастера настройки.
+    if (Array.isArray(cfg.models) && cfg.models.length) {
+      say(`${C.dim}Живой список недоступен (${error.message}) — показываю сохранённый${C.reset}`);
+      ids = cfg.models;
+    } else { fail(error.message); return null; }
+  }
   if (!ids.length) return ui.promptLine('Провайдер не отдал список моделей — введите имя модели вручную');
   say(`${C.dim}Моделей у провайдера: ${ids.length}${C.reset}`);
   // Сортируем: сначала известные (каталог), потом остальные. Free — в начало.
@@ -115,9 +161,10 @@ function makeApprover(autoYes) {
 // ---- chat ---------------------------------------------------------------------
 
 async function chatLoop(root, args) {
+  // Брендинг — до мастера настройки, чтобы он был виден и при первом запуске.
+  ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
   let cfg = await ensureConfig(args);
   const autoYes = args.has('--yes');
-  ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
   say(`${C.dim}  модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
   say(`  ${C.dim}/new /model /sessions /plan /queue /config /exit · сообщение во время работы агента → в очередь${C.reset}`);
   say('');
@@ -343,7 +390,8 @@ async function runTaskStream(cfg, root, session, task, autoYes, mcpTools = [], q
 
 async function ensureConfig(overrides) {
   let cfg = config.resolve(overrides);
-  if (!cfg.baseUrl || !cfg.key || !cfg.model) {
+  // Ключ опционален: локальным шлюзам (Ollama) и открыим каталогам он не нужен.
+  if (!cfg.baseUrl || !cfg.model) {
     say(`${C.dim}первый запуск — настройка провайдера${C.reset}\n`);
     const setup = await setupWizard(cfg);
     if (!setup) process.exit(1);
@@ -360,6 +408,7 @@ async function ensureConfig(overrides) {
 async function runOnce(root, args) {
   const task = args.filter(a => !a.startsWith('--')).join(' ').trim();
   if (!task) { fail('Укажите задачу: notcode run "исправь тесты в src"'); return; }
+  ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
   const cfg = await ensureConfig(args);
   const result = await runTaskStream(cfg, root, { messages: [] }, task, args.has('--yes'));
   process.exitCode = result ? 0 : 1;

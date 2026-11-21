@@ -16,12 +16,14 @@ function Write-Info([string]$Text) { Write-Host "    $Text" -ForegroundColor Gra
 function Write-Warn2([string]$Text) { Write-Host "!!  $Text" -ForegroundColor Yellow }
 
 function Show-Banner {
+  # Тот же блочный NOTCODE, что рисует сам CLI (lib/ui-menu.js).
   $b = @'
-  _   _        _          _  _____
- | \ | | ___  | |    ___ | |/ ____|
- |  \| |/ _ \ | |   / _ \| | (___
- | |\  | (_) || |__| (_) | |\___ \
- |_| \_|\___/ |_____\___/|_|____) |
+███╗   ██╗  ██████╗  ████████╗   ██████╗  ██████╗  ██████╗  ███████╗
+████╗  ██║ ██╔═══██╗ ██╔══════╝  ██╔═══██╗ ██╔═══██╗ ██╔══██╗ ██╔════╝
+██╔██╗ ██║ ██║   ██║ ██║   ██║   ██║   ██║ ██║   ██║ ██║  ██║ █████╗
+██║╚██╗██║ ██║   ██║ ██║    ██╗  ██║   ██║ ██║   ██║ ██║  ██║ ██╔══╝
+██║ ╚████║ ╚██████╔╝ ╚██████╔╝   ╚██████╔╝ ╚██████╔╝ ██████╔╝ ███████╗
+╚═╝  ╚═══╝  ╚═════╝   ╚═════╝     ╚═════╝   ╚═════╝  ╚═════╝  ╚══════╝
 '@
   Write-Host $b -ForegroundColor Green
   Write-Host '  NotCode CLI - AI agent for your terminal' -ForegroundColor White
