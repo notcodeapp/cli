@@ -72,8 +72,10 @@ async function editModelList(ids) {
 async function setupWizard(current) {
   const cfg = { ...current };
   // 1. Провайдер: текущий остаётся по умолчанию, пресеты и свой адрес — рядом.
+  // noKey для «Оставить текущий» не ставится: если ключ ещё не задан, вопрос
+  // ключа показывается ПЕРЕД фетчем моделей (Enter пропускает).
   const presets = cfg.baseUrl
-    ? [{ label: `Оставить текущий · ${cfg.baseUrl}`, hint: 'Enter', value: cfg.baseUrl, noKey: cfg.key === '' }, ...PROVIDER_PRESETS]
+    ? [{ label: `Оставить текущий · ${cfg.baseUrl}`, hint: 'Enter', value: cfg.baseUrl }, ...PROVIDER_PRESETS]
     : PROVIDER_PRESETS;
   const presetIndex = await ui.pickMenu({ title: 'Выберите провайдера', items: presets, pageSize: 10 });
   if (presetIndex === null) return null;
