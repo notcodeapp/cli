@@ -51,3 +51,10 @@ test('sessions: save → list → load → remove', () => {
   assert.ok(!sessions.list().some(s => s.id === saved.id));
   void path; void fs;
 });
+
+test('bin: failError определён и используется (регрессия ReferenceError в чат-цикле)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'notcode.js'), 'utf8');
+  assert.ok(src.includes('function failError'), 'определение failError отсутствует');
+  const calls = (src.match(/failError\(/g) ?? []).length;
+  assert.ok(calls >= 4, `failError должен вызываться в catch-блоках, найдено: ${calls - 1}`);
+});
