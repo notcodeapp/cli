@@ -119,7 +119,7 @@ async function chatLoop(root, args) {
   const autoYes = args.has('--yes');
   ui.printBanner(`v${VERSION} · ваш ключ · ваши модели`);
   say(`${C.dim}  модель: ${C.reset}${C.accent}${cfg.model || 'не выбрана'}${C.reset}  ${C.dim}·  ${C.reset}${C.dim}провайдер: ${cfg.baseUrl}${C.reset}`);
-  say(`  ${C.dim}/new /model /sessions /config /queue /exit · сообщение во время работы агента → в очередь${C.reset}`);
+  say(`  ${C.dim}/new /model /sessions /plan /queue /config /exit · сообщение во время работы агента → в очередь${C.reset}`);
   say('');
 
   // сессия: новая или продолжение
@@ -244,10 +244,15 @@ async function chatLoop(root, args) {
       if (task === '/exit' || task === '/quit') { currentAbort?.abort(new Error('Прервано пользователем')); rl.close(); return; }
       if (task === '/new') { session = { id: null, name: '', messages: [] }; say(`${C.dim}новый чат${C.reset}\n`); rl.prompt(); return; }
       if (task === '/sessions') { const next = await pickSession(); if (next !== undefined) session = next; rl.prompt(); return; }
+      if (task === '/plan') {
+        if (session?.plan?.length) { for (const line of chatUi.planLines(session.plan)) say(line); }
+        else say(`${C.dim}плана пока нет — агент сам создаст чеклист на многошаговой задаче${C.reset}`);
+        rl.prompt(); return;
+      }
       if (task === '/model') { await switchModel(); rl.prompt(); return; }
       if (task === '/config') { const next = await setupWizard(cfg); if (next) cfg = next; say(''); rl.prompt(); return; }
       if (task.startsWith('/queue')) { queueCommand(task.split(/\s+/).slice(1)); rl.prompt(); return; }
-      if (task.startsWith('/')) { say(`${C.dim}команды: /new · /sessions · /model · /config · /queue · /exit${C.reset}\n`); rl.prompt(); return; }
+      if (task.startsWith('/')) { say(`${C.dim}команды: /new · /sessions · /model · /plan · /queue · /config · /exit${C.reset}\n`); rl.prompt(); return; }
 
       if (busy) {
         queue.push({ text: task });
