@@ -26,6 +26,11 @@ const C = NO_COLOR ? { accent: '', dim: '', text: '', red: '', reset: '', bold: 
 };
 const say = (text = '') => process.stdout.write(text + '\n');
 const fail = (message) => { say(`${C.red}ошибка:${C.reset} ${message}`); process.exitCode = 1; };
+/// Показывает ошибку с подсказкой, если провайдер её приложил (hint из llm.js).
+function failError(error) {
+  fail(error?.message || String(error));
+  if (error?.hint) say(`${C.accent}подсказка:${C.reset} ${error.hint}`);
+}
 
 const PROVIDER_PRESETS = [
   { label: 'OpenCode Zen', hint: 'бесплатные модели (big-pickle, DeepSeek Flash и др.)', value: 'https://opencode.ai/inference/openai/v1' },
