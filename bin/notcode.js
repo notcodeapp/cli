@@ -16,6 +16,7 @@ const ui = require('../lib/ui-menu');
 const catalog = require('../lib/model-catalog');
 const chatUi = require('../lib/chat-ui');
 const mcp = require('../lib/mcp');
+const local = require('../lib/local-models');
 
 const VERSION = require('../package.json').version;
 
@@ -32,7 +33,7 @@ const PROVIDER_PRESETS = [
   { label: 'DeepSeek', hint: 'api.deepseek.com', value: 'https://api.deepseek.com/v1' },
   { label: 'Groq', hint: 'быстрый инференс', value: 'https://api.groq.com/openai/v1' },
   { label: 'OpenAI', hint: 'api.openai.com', value: 'https://api.openai.com/v1' },
-  { label: 'Ollama · локально', hint: '127.0.0.1:11434 · без ключа', value: 'http://127.0.0.1:11434/v1', noKey: true },
+  { label: 'Ollama · локально', hint: 'скачивание и запуск на твоём ПК, без ключа', value: 'http://127.0.0.1:11434/v1', noKey: true, local: true },
   { label: 'Свой адрес…', hint: 'любой OpenAI-compatible', value: '__custom__' },
 ];
 
@@ -86,6 +87,12 @@ async function setupWizard(current) {
   if (!cfg.baseUrl) return null;
   const bad = config.validateBaseUrl(cfg.baseUrl);
   if (bad) { fail(bad); return null; }
+  // Локальные модели: железо → рекомендации → скачивание → выбор.
+  if (preset.local) {
+    const localCfg = await localWizard();
+    if (!localCfg) return null;
+    return localCfg;
+  }
   // 2. Ключ — опционален: локальным шлюзам не нужен, Enter пропускает.
   if (!preset.noKey && !cfg.key) {
     cfg.key = await ui.askSecret('API-ключ провайдера (Enter — пропустить, если ключ не нужен)');
@@ -553,6 +560,119 @@ async function doctor() {
   say(`  конфиг            ${config.configPath()}`);
 }
 
+// ---- локальные модели ---------------------------------------------------------
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} ГБ`;
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} МБ`;
+  return `${Math.round(bytes / 1024)} КБ`;
+}
+
+/// Менеджер локальных моделей: железо → рекомендации → скачивание → конфиг.
+async function localWizard() {
+  say(`${C.bold}Локальные модели · Ollama${C.reset}`);
+  const hardware = await local.detectHardware();
+  const gpuText = hardware.gpu
+    ? `${hardware.gpu}${hardware.vramGb ? ` · VRAM ${hardware.vramGb} ГБ` : ''}`
+    : 'не определена — рекомендации по RAM';
+  say(`  CPU: ${hardware.cpu}`);
+  say(`  RAM: ${hardware.ramGb} ГБ`);
+  say(`  GPU: ${gpuText}`);
+
+  const ollama = await local.findOllama();
+  if (!ollama) {
+    say(`${C.accent}Ollama не установлена.${C.reset}`);
+    const choice = await ui.pickMenu({ title: 'Установить Ollama?', items: [
+      { label: 'Установить через winget', hint: 'Windows 10/11, без вопросов' },
+      { label: 'Открыть https://ollama.com/download', hint: 'установщик вручную' },
+      { label: 'Отмена', hint: 'настроить облачного провайдера' },
+    ], pageSize: 6 });
+    if (choice === 0) {
+      const run = require('node:child_process').spawnSync('cmd.exe', ['/c', 'winget install --id Ollama.Ollama --silent --accept-package-agreements --accept-source-agreements'], { stdio: 'inherit', timeout: 15 * 60 * 1000 });
+      if (run.status !== 0) {
+        fail('winget не смог установить Ollama — скачай вручную с https://ollama.com/download и перезапусти notcode');
+        return null;
+      }
+      say(`${C.accent}Ollama установлена.${C.reset} Если команда не видна — открой новый терминал и повтори.`);
+      const again = await local.findOllama();
+      if (!again) { fail('ollama не найдена в PATH. Открой новый терминал и повтори: notcode local'); return null; }
+      return await localWizard();
+    }
+    if (choice === 1) {
+      const opener = process.platform === 'win32' ? 'cmd /c start' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+      require('node:child_process').exec(`${opener} "https://ollama.com/download"`);
+      say('После установки перезапусти notcode.');
+      return null;
+    }
+    return null;
+  }
+
+  try {
+    const serveState = await local.ensureServe(ollama);
+    if (serveState.started) say(`${C.dim}Сервер Ollama запущен в фоне (127.0.0.1:11434)${C.reset}`);
+  } catch (error) {
+    failError(error);
+    return null;
+  }
+
+  const installed = await local.installedModels();
+  if (installed.length) say(`${C.dim}Установлено: ${installed.join(', ')}${C.reset}`);
+
+  const view = await ui.pickMenu({ title: 'Какие модели показать?', items: [
+    { label: 'Рекомендуемые для твоего ПК', hint: 'влезают в RAM/GPU' },
+    { label: 'Весь каталог (включая тяжёлые)', hint: 'тяжёлые запустятся медленно' },
+    { label: 'Установленные', hint: 'уже скачаны' },
+  ], pageSize: 8 });
+  if (view === null) return null;
+
+  let items;
+  const recommendations = local.recommend(hardware, local.LOCAL_CATALOG, installed);
+  if (view === 2) {
+    if (!installed.length) { fail('Установленных моделей нет — сначала скачай из каталога.'); return null; }
+    items = installed.map((name) => ({ label: name, hint: 'установлена' }));
+  } else {
+    const list = view === 0 ? recommendations.recommended : [...recommendations.recommended, ...recommendations.beyond];
+    if (!list.length) { fail('Ничего не подошло — открой «Весь каталог».'); return null; }
+    items = list.map((m) => ({
+      label: m.name,
+      hint: `${m.installed ? 'установлена · ' : ''}~${m.ramGb} ГБ${m.coding ? ' · код' : ''} · ${m.note}`,
+    }));
+  }
+  const modelIndex = await ui.pickMenu({ title: 'Модель', items, pageSize: 14 });
+  if (modelIndex === null) return null;
+  const chosen = items[modelIndex].label;
+
+  if (!installed.includes(chosen)) {
+    say(`${C.dim}Скачиваю ${chosen} — файлы уйдут в домашнюю папку Ollama${C.reset}`);
+    if (process.stdout.isTTY) process.stdout.write('\n');
+    let lastRender = 0;
+    try {
+      await local.pullModel(ollama, chosen, (progress) => {
+        if (progress.fraction === undefined) return;
+        const now = Date.now();
+        if (now - lastRender < 250 && progress.fraction < 1) return;
+        lastRender = now;
+        const percent = Math.round(progress.fraction * 100);
+        const bars = Math.round(progress.fraction * 24);
+        const line = `${C.accent}[${'='.repeat(bars)}${' '.repeat(24 - bars)}]${C.reset} ${percent}%  ${C.dim}${formatBytes(progress.doneBytes ?? 0)} / ${formatBytes(progress.totalBytes ?? 0)}${C.reset}`;
+        if (process.stdout.isTTY) process.stdout.write(`\r\x1b[2K${line}`);
+        else say(line);
+        if (progress.fraction >= 1 && process.stdout.isTTY) process.stdout.write('\n');
+      });
+      say(`${C.accent}Скачано:${C.reset} ${chosen}`);
+    } catch (error) {
+      if (process.stdout.isTTY) process.stdout.write('\n');
+      failError(error);
+      return null;
+    }
+  }
+
+  const saved = { baseUrl: local.OLLAMA_URL + local.OPENAI_PATH, key: '', model: chosen, models: [chosen] };
+  config.save(saved);
+  say(`${C.accent}Готово:${C.reset} ${chosen} работает локально — без интернета и без ключа.`);
+  return config.resolve(saved);
+}
+
 // ---- dispatch --------------------------------------------------------------------
 
 async function main() {
@@ -576,6 +696,7 @@ async function main() {
     say('  notcode                  интерактивная сессия (меню чатов и моделей)');
     say('  notcode run "задача"     одна задача от начала до конца');
     say('  notcode models           список моделей провайдера');
+    say('  notcode local            локальные модели: железо → рекомендации → скачивание');
     say('  notcode mcp list         MCP-серверы (add <имя> -- <команда> / remove)');
     say('  notcode sync push|pull   чаты и провайдер ↔ аккаунт (--with-key)');
     say('  notcode google connect|status|backup — Google Drive');
@@ -645,6 +766,7 @@ async function main() {
   if (command === 'mcp') return mcpCommand(rest);
   if (command === 'version' || command === '--version' || command === '-v') { say(`notcode-cli v${VERSION}`); return; }
   if (command === 'doctor') return doctor();
+  if (command === 'local') return localWizard();
   fail(`Неизвестная команда: ${command}. Справка: notcode help`);
 }
 
