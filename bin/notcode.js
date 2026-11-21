@@ -91,7 +91,7 @@ async function setupWizard(current) {
   // 3. Живой список моделей провайдера.
   say(`${C.dim}Получаю список моделей с ${cfg.baseUrl}…${C.reset}`);
   let ids = [];
-  try { ids = await fetchModelList(cfg); } catch (error) { fail(error.message); }
+  try { ids = await fetchModelList(cfg); } catch (error) { failError(error); }
   if (ids.length) {
     say(`${C.dim}Моделей у провайдера: ${ids.length}${C.reset}`);
     const edited = await editModelList(ids);
@@ -265,7 +265,7 @@ async function chatLoop(root, args) {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) { fail(data.error || `HTTP ${response.status}`); return; }
       say(`${C.accent}публичная ссылка (90 дней):${C.reset} ${data.url}`);
-    } catch (error) { fail(error.message || String(error)); }
+    } catch (error) { failError(error); }
   }
 
   function queueCommand(restArgs) {
@@ -405,7 +405,7 @@ async function runTaskStream(cfg, root, session, task, autoYes, mcpTools = [], q
     spinner.stop();
     flushToolBlock();
     say('');
-    fail(error.message || String(error));
+    failError(error);
     return null;
   } finally {
     spinner.stop();
@@ -647,7 +647,7 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch((error) => { fail(error.message || String(error)); });
+  main().catch((error) => { failError(error); });
 }
 
 // Внутренние функции — для эмуляционных тестов (test/wizard.test.js).
